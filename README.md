@@ -62,6 +62,28 @@ and nothing has to tick. No file means no timer.
 `bin/pomodoro status` prints one line for prompts and status bars
 (`🍅 12:34`, `☕ 3:10`, `⏸`, or nothing).
 
+## Neovim
+
+The repo is also a Neovim plugin with a statusline component. With
+[lazy.nvim](https://github.com/folke/lazy.nvim):
+
+```lua
+{ "jwarykowski/herdr-pomodoro", lazy = true }
+```
+
+`require("herdr-pomodoro").status()` returns `🍅 12:34`, `☕ 3:10`, `⏸` or `""`;
+`.state()` returns the decoded state file for your own rendering. It reads the
+file at most once a second, so it is cheap on every redraw. With lualine:
+
+```lua
+sections = {
+	lualine_x = { function() return require("herdr-pomodoro").status() end, "filetype" },
+},
+```
+
+Change the icons with
+`require("herdr-pomodoro").setup({ icons = { work = "W", ["break"] = "B", idle = "-" } })`.
+
 ## Hooks
 
 An executable in `$(herdr plugin config-dir jwarykowski.herdr-pomodoro)/hooks/`
@@ -87,6 +109,13 @@ herdr plugin action invoke party --plugin jwarykowski.herdr-zsa-lights
 
 Optional. Put overrides in `config.env` inside the plugin config directory;
 see [`config.env.example`](config.env.example).
+
+## Development
+
+```sh
+make lint    # shellcheck, stylua --check, luacheck
+make test    # busted (specs run under Neovim via nlua)
+```
 
 ## License
 
