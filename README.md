@@ -117,6 +117,11 @@ make lint    # shellcheck, stylua --check, luacheck
 make test    # busted (specs run under Neovim via nlua)
 ```
 
+## Support
+
+herdr-pomodoro is free and MIT licensed. If it keeps you focused, you can
+[sponsor its development](https://github.com/sponsors/jwarykowski).
+
 ## License
 
 MIT
