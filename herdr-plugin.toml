@@ -1,0 +1,30 @@
+id = "jwarykowski.herdr-pomodoro"
+name = "Pomodoro"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+description = "A pomodoro timer: notifications, a sidebar token and hooks, with its state in one JSON file for statuslines and keyboard lights"
+platforms = ["linux", "macos"]
+
+# pick a running timer back up after herdr restarts
+[[startup]]
+command = ["bin/pomodoro", "resume"]
+
+[[actions]]
+id = "toggle"
+title = "Pomodoro: start / stop"
+command = ["bin/pomodoro", "toggle"]
+
+[[actions]]
+id = "start"
+title = "Pomodoro: start a work round"
+command = ["bin/pomodoro", "start"]
+
+[[actions]]
+id = "stop"
+title = "Pomodoro: stop"
+command = ["bin/pomodoro", "stop"]
+
+[[actions]]
+id = "skip"
+title = "Pomodoro: skip to the next phase"
+command = ["bin/pomodoro", "skip"]

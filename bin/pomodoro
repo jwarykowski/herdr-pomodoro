@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+# herdr-pomodoro: a pomodoro timer for herdr. The timer's state lives in one
+# JSON file that anything can read (nvim statusline, keyboard lights, a shell
+# prompt):
+#
+#   ${XDG_STATE_HOME:-~/.local/state}/herdr-pomodoro/state.json
+#   {"phase": "work", "started_at": 1760160000, "ends_at": 1760161500, "round": 2}
+#
+# phase is work, break, long_break or idle (between rounds, auto_continue off);
+# times are unix seconds, so readers work out the remaining time themselves.
+# No file means no timer.
+#
+# Phase changes show a herdr notification and run the hook for the event, an
+# executable in $config_dir/hooks named after it: pomodoro.started,
+# pomodoro.work_done, pomodoro.break_done, pomodoro.stopped.
+#
+# usage: pomodoro start     start a work phase (the next round when idle)
+#        pomodoro stop      stop the timer
+#        pomodoro toggle    stop if running, else start
+#        pomodoro skip      end the current phase now
+#        pomodoro status    one line for prompts and status bars, e.g. "🍅 12:34"
+#        pomodoro resume    restart the runner for a live timer (startup hook)
+#        pomodoro run       the runner: advance phases in the foreground
+set -uo pipefail
+
+# plugin commands inherit herdr's environment; add the usual tool locations
+PATH="$PATH:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin"
+
+herdr="${HERDR_BIN_PATH:-herdr}"
+config_dir="${HERDR_PLUGIN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-pomodoro}"
+# a fixed, documented path rather than herdr's plugin state dir, so readers
+# outside herdr can find it
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-pomodoro"
+state="$state_dir/state.json"
+pidfile="$state_dir/runner.pid"
+lock="$state_dir/lock"
+
+# defaults; override any of them in $config_dir/config.env
+HERDR_POMODORO_WORK=25        # minutes
+HERDR_POMODORO_BREAK=5        # minutes
+HERDR_POMODORO_LONG_BREAK=15  # minutes
+HERDR_POMODORO_ROUNDS=4       # work rounds per long break
+HERDR_POMODORO_AUTO_CONTINUE=0 # 1: start the next round when a break ends
+HERDR_POMODORO_TOKEN=pomo     # sidebar token; empty to report none
+HERDR_POMODORO_WORK_ICON="🍅"
+HERDR_POMODORO_BREAK_ICON="☕"
+HERDR_POMODORO_IDLE_ICON="⏸"
+# shellcheck source=/dev/null
+[[ -f "$config_dir/config.env" ]] && source "$config_dir/config.env"
+
+now() { date +%s; }
+
+notify() {
+  "$herdr" notification show "$1" --body "$2" --sound "done" >/dev/null 2>&1 || true
+}
+
+# field prints one field of the state file, or nothing without a timer
+field() {
+  [[ -f "$state" ]] && jq -r --arg f "$1" '.[$f] // empty' "$state" 2>/dev/null
+}
+
+# write_state phase round [minutes]: replace the state file atomically
+write_state() {
+  local t ends=null
+  t=$(now)
+  [[ -n "${3:-}" ]] && ends=$((t + $3 * 60))
+  mkdir -p "$state_dir"
+  jq -n --arg phase "$1" --argjson round "$2" --argjson start "$t" --argjson ends "$ends" \
+    '{phase: $phase, started_at: $start, ends_at: $ends, round: $round}' >"$state.tmp" &&
+    mv "$state.tmp" "$state"
+}
+
+# hook event: run $config_dir/hooks/<event> in the background, if executable
+hook() {
+  local h="$config_dir/hooks/$1"
+  [[ -x "$h" ]] || return 0
+  # read the state now: the background job would run after stop removes it
+  local phase round ends
+  phase=$(field phase) round=$(field round) ends=$(field ends_at)
+  HERDR_POMODORO_EVENT="$1" HERDR_POMODORO_PHASE="$phase" HERDR_POMODORO_ROUND="$round" \
+    HERDR_POMODORO_ENDS_AT="$ends" HERDR_POMODORO_STATE="$state" \
+    nohup "$h" >>"$state_dir/hooks.log" 2>&1 &
+}
+
+# with_lock cmd...: herdr runs actions asynchronously, so serialise changes
+with_lock() {
+  local _
+  mkdir -p "$state_dir"
+  for _ in $(seq 50); do
+    if mkdir "$lock" 2>/dev/null; then
+      "$@"
+      local rc=$?
+      rmdir "$lock"
+      return $rc
+    fi
+    sleep 0.1
+  done
+  echo "pomodoro: $lock is held; remove it if no pomodoro command is running" >&2
+  return 1
+}
+
+running() {
+  [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null
+}
+
+spawn() {
+  running && return 0
+  nohup "$0" run >"$state_dir/runner.log" 2>&1 &
+  echo $! >"$pidfile"
+  disown
+}
+
+# status_line renders the timer, or nothing without one
+status_line() {
+  local phase ends left icon
+  phase=$(field phase)
+  case "$phase" in
+    work) icon=$HERDR_POMODORO_WORK_ICON ;;
+    break | long_break) icon=$HERDR_POMODORO_BREAK_ICON ;;
+    idle)
+      echo "$HERDR_POMODORO_IDLE_ICON"
+      return
+      ;;
+    *) return ;;
+  esac
+  ends=$(field ends_at)
+  left=$((ends - $(now)))
+  ((left < 0)) && left=0
+  printf '%s %d:%02d\n' "$icon" $((left / 60)) $((left % 60))
+}
+
+# report_token puts the timer on every workspace's sidebar as $pomo, in
+# minutes ("🍅12m"); it expires on its own if the runner dies
+report_token() {
+  [[ -n "$HERDR_POMODORO_TOKEN" ]] || return 0
+  local value="" ids id line
+  line=$(status_line)
+  if [[ -n "$line" ]]; then
+    local ends left
+    ends=$(field ends_at)
+    if [[ -n "$ends" ]]; then
+      left=$(((ends - $(now) + 59) / 60))
+      value="${line%% *}${left}m"
+    else
+      value=$line
+    fi
+  fi
+  ids=$("$herdr" workspace list 2>/dev/null | jq -r '.result.workspaces[].workspace_id') || return 0
+  for id in $ids; do
+    if [[ -n "$value" ]]; then
+      "$herdr" workspace report-metadata "$id" --source herdr-pomodoro --ttl-ms 90000 \
+        --token "$HERDR_POMODORO_TOKEN=$value" >/dev/null 2>&1
+    else
+      "$herdr" workspace report-metadata "$id" --source herdr-pomodoro \
+        --clear-token "$HERDR_POMODORO_TOKEN" >/dev/null 2>&1
+    fi
+  done
+}
+
+do_start() {
+  local round
+  case "$(field phase)" in
+    work | break | long_break) return 0 ;;
+    idle) round=$(($(field round) + 1)) ;;
+    *) round=1 ;;
+  esac
+  write_state work "$round" "$HERDR_POMODORO_WORK"
+  hook pomodoro.started
+  spawn
+}
+
+do_stop() {
+  [[ -f "$state" ]] || return 0
+  if running; then kill "$(cat "$pidfile")" 2>/dev/null; fi
+  rm -f "$pidfile"
+  hook pomodoro.stopped
+  rm -f "$state"
+}
+
+# advance ends the current phase and moves to the next one
+advance() {
+  local phase round
+  phase=$(field phase)
+  round=$(field round)
+  case "$phase" in
+    work)
+      if ((round % HERDR_POMODORO_ROUNDS == 0)); then
+        write_state long_break "$round" "$HERDR_POMODORO_LONG_BREAK"
+        notify "$HERDR_POMODORO_WORK_ICON Round $round done" "Long break: $HERDR_POMODORO_LONG_BREAK minutes"
+      else
+        write_state break "$round" "$HERDR_POMODORO_BREAK"
+        notify "$HERDR_POMODORO_WORK_ICON Round $round done" "Break: $HERDR_POMODORO_BREAK minutes"
+      fi
+      hook pomodoro.work_done
+      ;;
+    break | long_break)
+      if [[ "$HERDR_POMODORO_AUTO_CONTINUE" == 1 ]]; then
+        write_state work $((round + 1)) "$HERDR_POMODORO_WORK"
+        notify "$HERDR_POMODORO_BREAK_ICON Break over" "Round $((round + 1)): $HERDR_POMODORO_WORK minutes"
+      else
+        write_state idle "$round"
+        notify "$HERDR_POMODORO_BREAK_ICON Break over" "Start the next round when you're ready"
+      fi
+      hook pomodoro.break_done
+      ;;
+  esac
+}
+
+# run advances phases as they end and refreshes the sidebar token; it exits
+# when the timer stops or goes idle
+run() {
+  local phase ends left
+  mkdir -p "$state_dir"
+  running || echo $$ >"$pidfile"
+  trap 'rm -f "$pidfile"; exit 0' INT TERM
+  while true; do
+    phase=$(field phase)
+    [[ "$phase" == work || "$phase" == break || "$phase" == long_break ]] || break
+    ends=$(field ends_at)
+    left=$((ends - $(now)))
+    if ((left <= 0)); then
+      with_lock advance
+      continue
+    fi
+    report_token
+    # wake for the phase end or the next token refresh; background sleep +
+    # wait, so stop's TERM lands immediately
+    sleep $((left < 30 ? left : 30)) &
+    wait $!
+  done
+  report_token
+  rm -f "$pidfile"
+}
+
+case "${1:-}" in
+  start) with_lock do_start ;;
+  stop)
+    with_lock do_stop
+    report_token
+    ;;
+  toggle)
+    case "$(field phase)" in
+      work | break | long_break)
+        with_lock do_stop
+        report_token
+        ;;
+      *) with_lock do_start ;;
+    esac
+    ;;
+  skip)
+    with_lock advance
+    # the runner may be asleep for the old phase; restart it for the new one
+    if running; then kill "$(cat "$pidfile")" 2>/dev/null; fi
+    rm -f "$pidfile"
+    spawn
+    ;;
+  status) status_line ;;
+  resume)
+    case "$(field phase)" in
+      work | break | long_break) spawn ;;
+      *) report_token ;;
+    esac
+    ;;
+  run) run ;;
+  *)
+    echo "usage: pomodoro start|stop|toggle|skip|status|resume|run" >&2
+    exit 1
+    ;;
+esac
