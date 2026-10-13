@@ -1,7 +1,4 @@
-<table>
-<tr>
-<td width="200" valign="top"><img src="assets/herdr-pomodoro.png" alt="herdr-pomodoro" width="180"></td>
-<td valign="top">
+<p align="center"><img src="assets/herdr-pomodoro.svg" alt="herdr-pomodoro" width="120"></p>
 
 # herdr-pomodoro
 
@@ -128,9 +125,5 @@ herdr-pomodoro is free and MIT licensed. If it keeps you focused, you can
 [sponsor its development](https://github.com/sponsors/jwarykowski).
 
 ## License
-
-</td>
-</tr>
-</table>
 
 MIT
