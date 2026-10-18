@@ -2,6 +2,10 @@
 
 # herdr-pomodoro
 
+> **Moved into [herdr-keybars](https://code.warykowski.io/jwarykowski/herdr-keybars)**,
+> which does this (a pomodoro timer, now keybars Pro's Focus timer with herdr actions, a `$focus` sidebar token and break notifications) alongside your agents on the keyboard. This
+> plugin isn't developed further; uninstall it and install herdr-keybars.
+
 A [herdr](https://herdr.dev) plugin: a pomodoro timer with notifications, a
 sidebar token and hooks. Its state is one JSON file, so anything can show it:
 a Neovim statusline, keyboard lights, a shell prompt.
