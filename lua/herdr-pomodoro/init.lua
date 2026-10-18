@@ -9,15 +9,15 @@ local defaults = {
 local config = vim.tbl_deep_extend("force", {}, defaults)
 
 -- format renders a state for a statusline: "🍅 12:34" while a phase runs, the
--- idle icon between rounds, else "".
+-- idle icon between rounds (phase ""), else "".
 local function format(state, now, icons)
 	if type(state) ~= "table" then
 		return ""
 	end
-	if state.phase == "idle" then
+	if state.phase ~= "work" and state.phase ~= "break" then
 		return icons.idle or ""
 	end
-	local icon = state.phase == "work" and icons.work or icons["break"]
+	local icon = icons[state.phase]
 	if not icon or type(state.ends_at) ~= "number" then
 		return ""
 	end
@@ -54,7 +54,7 @@ function M.status()
 	return format(read(now), now, config.icons)
 end
 
--- state returns the decoded state file (phase, started_at, ends_at, round), or
+-- state returns the decoded state file (phase, started_at, ends_at, round, long), or
 -- nil without a timer, for statuslines that render it themselves.
 function M.state()
 	return read(os.time())

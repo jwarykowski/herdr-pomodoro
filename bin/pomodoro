@@ -4,21 +4,25 @@
 # prompt):
 #
 #   ${XDG_STATE_HOME:-~/.local/state}/herdr-pomodoro/state.json
-#   {"phase": "work", "started_at": 1760160000, "ends_at": 1760161500, "round": 2}
+#   {"phase": "work", "started_at": 1760160000, "ends_at": 1760161500, "round": 2, "long": false}
 #
-# phase is work, break, long_break or idle (between rounds, auto_continue off);
-# times are unix seconds, so readers work out the remaining time themselves.
-# No file means no timer.
+# phase is work, break, or "" between rounds (auto_continue off), as keybars
+# Pro's Focus names them; long is true for every fourth break. Times are unix
+# seconds, so readers work out the remaining time themselves. No file means
+# no timer.
 #
 # Phase changes show a herdr notification and run the hook for the event, an
-# executable in $config_dir/hooks named after it: pomodoro.started,
-# pomodoro.work_done, pomodoro.break_done, pomodoro.stopped.
+# executable in $config_dir/hooks named after it, as keybars Pro's Focus
+# events: focus.started (a work round), focus.break, focus.done (a break
+# ended and the timer waits), focus.stopped.
 #
 # usage: pomodoro start     start a work phase (the next round when idle)
 #        pomodoro stop      stop the timer
 #        pomodoro toggle    stop if running, else start
 #        pomodoro skip      end the current phase now
-#        pomodoro status    one line for prompts and status bars, e.g. "🍅 12:34"
+#        pomodoro status    one line for prompts and status bars, e.g. "🍅 12:34";
+#                           -json prints {"phase", "remaining", "length"} in
+#                           seconds, as keybars-pro focus status -json does
 #        pomodoro resume    restart the runner for a live timer (startup hook)
 #        pomodoro run       the runner: advance phases in the foreground
 set -uo pipefail
@@ -59,15 +63,24 @@ field() {
   [[ -f "$state" ]] && jq -r --arg f "$1" '.[$f] // empty' "$state" 2>/dev/null
 }
 
-# write_state phase round [minutes]: replace the state file atomically
+# write_state phase round [minutes] [long]: replace the state file atomically
 write_state() {
   local t ends=null
   t=$(now)
   [[ -n "${3:-}" ]] && ends=$((t + $3 * 60))
   mkdir -p "$state_dir"
   jq -n --arg phase "$1" --argjson round "$2" --argjson start "$t" --argjson ends "$ends" \
-    '{phase: $phase, started_at: $start, ends_at: $ends, round: $round}' >"$state.tmp" &&
+    --argjson long "${4:-false}" \
+    '{phase: $phase, started_at: $start, ends_at: $ends, round: $round, long: $long}' >"$state.tmp" &&
     mv "$state.tmp" "$state"
+}
+
+# live is whether a phase is counting down
+live() {
+  case "$(field phase)" in
+    work | break) return 0 ;;
+  esac
+  return 1
 }
 
 # hook event: run $config_dir/hooks/<event> in the background, if executable
@@ -114,19 +127,30 @@ spawn() {
 status_line() {
   local phase ends left icon
   phase=$(field phase)
+  [[ -f "$state" ]] || return 0
   case "$phase" in
     work) icon=$HERDR_POMODORO_WORK_ICON ;;
-    break | long_break) icon=$HERDR_POMODORO_BREAK_ICON ;;
-    idle)
+    break) icon=$HERDR_POMODORO_BREAK_ICON ;;
+    *)
       echo "$HERDR_POMODORO_IDLE_ICON"
       return
       ;;
-    *) return ;;
   esac
   ends=$(field ends_at)
   left=$((ends - $(now)))
   ((left < 0)) && left=0
   printf '%s %d:%02d\n' "$icon" $((left / 60)) $((left % 60))
+}
+
+# status_json is the timer as keybars-pro focus status -json prints Focus:
+# {"phase": "work", "remaining": 742, "length": 1500}, phase "" when none runs
+status_json() {
+  if live; then
+    jq -c --argjson now "$(now)" \
+      '{phase, remaining: ([.ends_at - $now, 0] | max), length: (.ends_at - .started_at)}' "$state"
+  else
+    echo '{"phase":"","remaining":0,"length":0}'
+  fi
 }
 
 # report_token puts the timer on every workspace's sidebar as $pomo, in
@@ -158,14 +182,11 @@ report_token() {
 }
 
 do_start() {
-  local round
-  case "$(field phase)" in
-    work | break | long_break) return 0 ;;
-    idle) round=$(($(field round) + 1)) ;;
-    *) round=1 ;;
-  esac
+  local round=1
+  live && return 0
+  [[ -f "$state" ]] && round=$(($(field round) + 1))
   write_state work "$round" "$HERDR_POMODORO_WORK"
-  hook pomodoro.started
+  hook focus.started
   spawn
 }
 
@@ -173,7 +194,7 @@ do_stop() {
   [[ -f "$state" ]] || return 0
   if running; then kill "$(cat "$pidfile")" 2>/dev/null; fi
   rm -f "$pidfile"
-  hook pomodoro.stopped
+  hook focus.stopped
   rm -f "$state"
 }
 
@@ -185,23 +206,24 @@ advance() {
   case "$phase" in
     work)
       if ((round % HERDR_POMODORO_ROUNDS == 0)); then
-        write_state long_break "$round" "$HERDR_POMODORO_LONG_BREAK"
+        write_state break "$round" "$HERDR_POMODORO_LONG_BREAK" true
         notify "$HERDR_POMODORO_WORK_ICON Round $round done" "Long break: $HERDR_POMODORO_LONG_BREAK minutes"
       else
         write_state break "$round" "$HERDR_POMODORO_BREAK"
         notify "$HERDR_POMODORO_WORK_ICON Round $round done" "Break: $HERDR_POMODORO_BREAK minutes"
       fi
-      hook pomodoro.work_done
+      hook focus.break
       ;;
-    break | long_break)
+    break)
       if [[ "$HERDR_POMODORO_AUTO_CONTINUE" == 1 ]]; then
         write_state work $((round + 1)) "$HERDR_POMODORO_WORK"
         notify "$HERDR_POMODORO_BREAK_ICON Break over" "Round $((round + 1)): $HERDR_POMODORO_WORK minutes"
+        hook focus.started
       else
-        write_state idle "$round"
+        write_state "" "$round"
         notify "$HERDR_POMODORO_BREAK_ICON Break over" "Start the next round when you're ready"
+        hook focus.done
       fi
-      hook pomodoro.break_done
       ;;
   esac
 }
@@ -209,13 +231,12 @@ advance() {
 # run advances phases as they end and refreshes the sidebar token; it exits
 # when the timer stops or goes idle
 run() {
-  local phase ends left
+  local ends left
   mkdir -p "$state_dir"
   running || echo $$ >"$pidfile"
   trap 'rm -f "$pidfile"; exit 0' INT TERM
   while true; do
-    phase=$(field phase)
-    [[ "$phase" == work || "$phase" == break || "$phase" == long_break ]] || break
+    live || break
     ends=$(field ends_at)
     left=$((ends - $(now)))
     if ((left <= 0)); then
@@ -239,13 +260,12 @@ case "${1:-}" in
     report_token
     ;;
   toggle)
-    case "$(field phase)" in
-      work | break | long_break)
-        with_lock do_stop
-        report_token
-        ;;
-      *) with_lock do_start ;;
-    esac
+    if live; then
+      with_lock do_stop
+      report_token
+    else
+      with_lock do_start
+    fi
     ;;
   skip)
     with_lock advance
@@ -254,12 +274,11 @@ case "${1:-}" in
     rm -f "$pidfile"
     spawn
     ;;
-  status) status_line ;;
+  status)
+    if [[ ${2:-} == -json ]]; then status_json; else status_line; fi
+    ;;
   resume)
-    case "$(field phase)" in
-      work | break | long_break) spawn ;;
-      *) report_token ;;
-    esac
+    if live; then spawn; else report_token; fi
     ;;
   run) run ;;
   *)

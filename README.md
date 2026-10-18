@@ -54,15 +54,22 @@ When a break ends the timer waits for you to start the next round; set
 `${XDG_STATE_HOME:-~/.local/state}/herdr-pomodoro/state.json`:
 
 ```json
-{"phase": "work", "started_at": 1760160000, "ends_at": 1760161500, "round": 2}
+{"phase": "work", "started_at": 1760160000, "ends_at": 1760161500, "round": 2, "long": false}
 ```
 
-`phase` is `work`, `break`, `long_break`, or `idle` (between rounds, `ends_at`
-null). Times are unix seconds, so a reader works out the remaining time itself
-and nothing has to tick. No file means no timer.
+`phase` is `work`, `break`, or `""` between rounds (`ends_at` null), as
+[keybars Pro](https://keybars.app/pro/)'s Focus timer names them; `long` is
+true for every fourth break. Times are unix seconds, so a reader works out the
+remaining time itself and nothing has to tick. No file means no timer.
 
 `bin/pomodoro status` prints one line for prompts and status bars
-(`🍅 12:34`, `☕ 3:10`, `⏸`, or nothing).
+(`🍅 12:34`, `☕ 3:10`, `⏸`, or nothing). `bin/pomodoro status -json` prints
+the timer as `keybars-pro focus status -json` prints Focus, so one reader
+handles both:
+
+```json
+{"phase": "work", "remaining": 742, "length": 1500}
+```
 
 ## Neovim
 
@@ -89,23 +96,30 @@ Change the icons with
 ## Hooks
 
 An executable in `$(herdr plugin config-dir jwarykowski.herdr-pomodoro)/hooks/`
-named after an event runs when it happens:
+named after an event runs when it happens. The names are keybars Pro's Focus
+events, so a hook can pass them straight on with `keybars-pro notify`:
 
 | event | when |
 |---|---|
-| `pomodoro.started` | a work round starts |
-| `pomodoro.work_done` | a work round ends, a break starts |
-| `pomodoro.break_done` | a break ends |
-| `pomodoro.stopped` | the timer is stopped |
+| `focus.started` | a work round starts |
+| `focus.break` | a work round ends and a break starts |
+| `focus.done` | a break ends and the timer waits for the next round |
+| `focus.stopped` | the timer is stopped |
+
+With `HERDR_POMODORO_AUTO_CONTINUE=1` a break runs straight into the next
+round, which fires `focus.started` instead of `focus.done`.
 
 Hooks get `HERDR_POMODORO_EVENT`, `_PHASE`, `_ROUND`, `_ENDS_AT` and `_STATE`
 (the state file path), and log to `hooks.log` next to it. For example,
-`hooks/pomodoro.work_done`:
+`hooks/focus.break`:
 
 ```sh
 #!/bin/sh
-herdr plugin action invoke party --plugin jwarykowski.herdr-zsa-lights
+keybars-pro notify focus.break
 ```
+
+[herdr-keybars](https://code.warykowski.io/jwarykowski/herdr-keybars)'s setup
+links these for you, and runs keybars Pro's Focus alongside.
 
 ## Configuration
 

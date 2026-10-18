@@ -1,6 +1,6 @@
 id = "jwarykowski.herdr-pomodoro"
 name = "Pomodoro"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.3"
 description = "A pomodoro timer: notifications, a sidebar token and hooks, with its state in one JSON file for statuslines and keyboard lights"
 platforms = ["linux", "macos"]
